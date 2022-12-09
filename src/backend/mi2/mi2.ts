@@ -1,4 +1,4 @@
-import { Breakpoint, IBackend, Thread, Stack, SSHArguments, Variable, VariableObject, MIError } from "../backend";
+import { Breakpoint, IBackend, Thread, Stack, SSHArguments, Variable, VariableObject, MIError, RegisterValue } from "../backend";
 import * as ChildProcess from "child_process";
 import { EventEmitter } from "events";
 import { parseMI, MINode } from '../mi_parse';
@@ -10,6 +10,11 @@ import { Client } from "ssh2";
 
 export function escape(str: string) {
 	return str.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+}
+
+export interface RegisterPair {
+	index: number;
+	name: string;
 }
 
 const nonOutput = /^(?:\d*|undefined)[\*\+\=]|[\~\@\&\^]/;
@@ -25,7 +30,15 @@ function couldBeOutput(line: string) {
 const trace = false;
 
 export class MI2 extends EventEmitter implements IBackend {
-	constructor(public application: string, public preargs: string[], public extraargs: string[], procEnv: any, public extraCommands: string[] = []) {
+	private registers: RegisterPair[];
+
+	constructor(public application: string,
+				public preargs: string[],
+				public extraargs: string[],
+				procEnv: any,
+				public extraCommands: string[] = [],
+				registers: string[] = [])
+	{
 		super();
 
 		if (procEnv) {
@@ -45,6 +58,9 @@ export class MI2 extends EventEmitter implements IBackend {
 				}
 			}
 			this.procEnv = env;
+		}
+		if(registers){
+			this.registers = registers.map(_name => {return {name: _name, index: 0xffff}});
 		}
 	}
 
@@ -758,6 +774,62 @@ export class MI2 extends EventEmitter implements IBackend {
 		return new Promise((resolve, reject) => {
 			this.sendCommand("data-read-memory-bytes 0x" + from.toString(16) + " " + length).then((result) => {
 				resolve(result.result("memory[0].contents"));
+			}, reject);
+		});
+	}
+
+	getRegisterNames():  Thenable<RegisterPair[]> {
+		if (trace)
+			this.log("stderr", "getRegisterNames");
+		return new Promise((resolve, reject) => {
+			this.sendCommand("data-list-register-names").then((result) => {
+				const names = result.result('register-names');
+				if (!Array.isArray(names)) {
+					this.log('stderr', 'WARNING: failed to retrieve register names.');
+					reject();
+					return;
+				}
+				let regs: RegisterPair[] = names.map((name, index) => { return {name:name.toString(), index: index} });
+				if(0 != this.registers.length){
+					let new_regs: RegisterPair[] = [];
+					this.registers.forEach(pair => {
+						const inc = names.includes(pair.name);
+						if(inc){
+							const index = names.indexOf(pair.name);
+							new_regs.push({name:pair.name, index:index})
+						}
+					});
+					this.registers = new_regs;
+					regs = new_regs;
+				}
+				resolve(regs);
+			}, reject);
+		});
+	}
+
+	getRegisterValues(): Thenable<RegisterValue[]> {
+		if (trace)
+			this.log("stderr", "getRegisterValues");
+		return new Promise((resolve, reject) => {
+			let regs = undefined;
+			if(0 != this.registers.length){
+				const indexes = this.registers.filter(pair => pair.index != 0xffff).map(pair => pair.index.toString());
+				indexes.forEach(ind => regs += ind + ' ');
+			}
+			const com = regs? `N ${regs}` : "N";
+			this.sendCommand(`data-list-register-values ${com}`).then((result) => {
+				const nodes = result.result('register-values');
+				if (!Array.isArray(nodes)) {
+					this.log('stderr', 'WARNING: failed to retrieve register values.');
+					reject();
+					return;
+				}
+				const ret: RegisterValue[] = nodes.map(node => {
+					const index = parseInt(MINode.valueOf(node, "number"));
+					const value = MINode.valueOf(node, "value");
+					return {index: index, value: value};
+				});
+				resolve(ret);
 			}, reject);
 		});
 	}

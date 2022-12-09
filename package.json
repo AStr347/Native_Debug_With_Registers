@@ -1,6 +1,6 @@
 {
-	"name": "debug",
-	"displayName": "Native Debug",
+	"name": "nativedebugwithregisters",
+	"displayName": "Native Debug With Registers",
 	"description": "GDB, LLDB & Mago-MI Debugger support for VSCode",
 	"keywords": [
 		"gdb",
@@ -10,8 +10,8 @@
 		"debug"
 	],
 	"license": "public domain",
-	"version": "0.26.0",
-	"publisher": "webfreak",
+	"version": "0.27.0-beta",
+	"publisher": "AStr347",
 	"icon": "images/icon.png",
 	"engines": {
 		"vscode": "^1.55.0"
@@ -20,14 +20,15 @@
 	"activationEvents": [
 		"onCommand:code-debug.examineMemoryLocation",
 		"onCommand:code-debug.getFileNameNoExt",
-		"onCommand:code-debug.getFileBasenameNoExt"
+		"onCommand:code-debug.getFileBasenameNoExt",
+		"onDebug"
 	],
 	"categories": [
 		"Debuggers"
 	],
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/WebFreak001/code-debug.git"
+		"url": "https://github.com/AStr347/Native_Debug_With_Registers"
 	},
 	"capabilities": {
 		"untrustedWorkspaces": {
@@ -41,6 +42,15 @@
 				"title": "Code-Debug: Examine memory location"
 			}
 		],
+		"views": {
+			"debug": [
+				{
+					"id": "code-debug.registers",
+					"name": "Registers for filtering getting",
+					"when": "debugType == gdb"
+				}
+			]
+		},
 		"breakpoints": [
 			{
 				"language": "c"
@@ -290,6 +300,11 @@
 										"description": "Content will be executed on the SSH host before the debugger call."
 									}
 								}
+							},
+							"registers":{
+								"type": "array",
+								"description": "Registers list for checking",
+								"default": []
 							}
 						}
 					},
@@ -454,6 +469,11 @@
 										"description": "Content will be executed on the SSH host before the debugger call."
 									}
 								}
+							},
+							"registers":{
+								"type": "array",
+								"description": "Registers list for checking",
+								"default": []
 							}
 						}
 					}

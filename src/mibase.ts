@@ -1,5 +1,5 @@
 import * as DebugAdapter from 'vscode-debugadapter';
-import { DebugSession, InitializedEvent, TerminatedEvent, StoppedEvent, ThreadEvent, OutputEvent, ContinuedEvent, Thread, StackFrame, Scope, Source, Handles } from 'vscode-debugadapter';
+import { DebugSession, InitializedEvent, TerminatedEvent, StoppedEvent, ThreadEvent, OutputEvent, ContinuedEvent, Thread, StackFrame, Scope, Source, Handles, Event } from 'vscode-debugadapter';
 import { DebugProtocol } from 'vscode-debugprotocol';
 import { Breakpoint, IBackend, Variable, VariableObject, ValuesFormattingMode, MIError } from './backend/backend';
 import { MINode } from './backend/mi_parse';
@@ -16,11 +16,33 @@ class ExtendedVariable {
 	}
 }
 
+class CustomStoppedEvent extends Event implements DebugProtocol.StoppedEvent {
+	public readonly body: {
+		reason: string,
+	};
+	public readonly event: string;
+
+	constructor(reason: string, threadId?: number) {
+		super('custom-stopped', {reason: reason, threadId: threadId});
+	}
+}
+
+class CustomContinuedEvent extends Event implements DebugProtocol.ContinuedEvent {
+	public readonly body: {
+		threadId: number;
+	};
+	public readonly event: string;
+
+	constructor(threadId: number) {
+		super('custom-continued', { threadId: threadId });
+	}
+}
+
 class VariableScope {
-	constructor (public readonly name: string, public readonly threadId: number, public readonly level: number) {
+	constructor(public readonly name: string, public readonly threadId: number, public readonly level: number) {
 	}
 
-	public static variableName (handle: number, name: string): string {
+	public static variableName(handle: number, name: string): string {
 		return `var_${handle}_${name}`;
 	}
 }
@@ -43,6 +65,7 @@ export class MI2DebugSession extends DebugSession {
 	protected miDebugger: MI2;
 	protected commandServer: net.Server;
 	protected serverPath: string;
+	protected currentThreadId: number;
 
 	public constructor(debuggerLinesStartAt1: boolean, isServer: boolean = false) {
 		super(debuggerLinesStartAt1, isServer);
@@ -62,6 +85,7 @@ export class MI2DebugSession extends DebugSession {
 		this.miDebugger.on("signal-stop", this.handlePause.bind(this));
 		this.miDebugger.on("thread-created", this.threadCreatedEvent.bind(this));
 		this.miDebugger.on("thread-exited", this.threadExitedEvent.bind(this));
+		this.miDebugger.on('running', this.handleRunning.bind(this));
 		this.miDebugger.once("debug-ready", (() => this.sendEvent(new InitializedEvent())));
 		try {
 			this.commandServer = net.createServer(c => {
@@ -117,32 +141,41 @@ export class MI2DebugSession extends DebugSession {
 		this.sendEvent(new OutputEvent(msg, type));
 	}
 
-	protected handleBreakpoint(info: MINode) {
-		const event = new StoppedEvent("breakpoint", parseInt(info.record("thread-id")));
-		(event as DebugProtocol.StoppedEvent).body.allThreadsStopped = info.record("stopped-threads") == "all";
+	protected sendStoppedEvent(reason: string, threadId: number, allThreadsStopped: boolean) {
+		this.currentThreadId = threadId;
+		const event = new StoppedEvent(reason, threadId);
+		(event as DebugProtocol.StoppedEvent).body.allThreadsStopped = allThreadsStopped;
 		this.sendEvent(event);
+
+		const customEvent = new CustomStoppedEvent(reason, threadId);
+		this.sendEvent(customEvent);
+	}
+
+	protected handleBreakpoint(info: MINode) {
+		this.sendStoppedEvent("breakpoint", parseInt(info.record("thread-id")), info.record("stopped-threads") == "all");
 	}
 
 	protected handleBreak(info?: MINode) {
-		const event = new StoppedEvent("step", info ? parseInt(info.record("thread-id")) : 1);
-		(event as DebugProtocol.StoppedEvent).body.allThreadsStopped = info ? info.record("stopped-threads") == "all" : true;
-		this.sendEvent(event);
+		const threadId = info ? parseInt(info.record("thread-id")) : 1;
+		const allThreadsStopped = info ? info.record("stopped-threads") == "all" : true;
+		this.sendStoppedEvent("step", threadId, allThreadsStopped);
 	}
 
 	protected handlePause(info: MINode) {
-		const event = new StoppedEvent("user request", parseInt(info.record("thread-id")));
-		(event as DebugProtocol.StoppedEvent).body.allThreadsStopped = info.record("stopped-threads") == "all";
-		this.sendEvent(event);
+		this.sendStoppedEvent("user request", parseInt(info.record("thread-id")), info.record("stopped-threads") == "all");
 	}
 
 	protected stopEvent(info: MINode) {
 		if (!this.started)
 			this.crashed = true;
 		if (!this.quit) {
-			const event = new StoppedEvent("exception", parseInt(info.record("thread-id")));
-			(event as DebugProtocol.StoppedEvent).body.allThreadsStopped = info.record("stopped-threads") == "all";
-			this.sendEvent(event);
+			this.sendStoppedEvent("exception", parseInt(info.record("thread-id")), info.record("stopped-threads") == "all");
 		}
+	}
+
+	protected handleRunning(info: MINode) {
+		this.sendEvent(new ContinuedEvent(this.currentThreadId, true));
+		this.sendEvent(new CustomContinuedEvent(this.currentThreadId));
 	}
 
 	protected threadCreatedEvent(info: MINode) {
@@ -371,6 +404,7 @@ export class MI2DebugSession extends DebugSession {
 				// when attaching (e.g., lldb), so the client assumes we are running and gets
 				// confused when we don't actually run or continue.  Therefore, we'll force a
 				// stopped event to be sent to the client (just in case) to synchronize the state.
+				this.currentThreadId = 1;
 				const event: DebugProtocol.StoppedEvent = new StoppedEvent("pause", 1);
 				event.body.description = "paused on attach";
 				event.body.allThreadsStopped = true;
@@ -717,7 +751,7 @@ export class MI2DebugSession extends DebugSession {
 					id: 1,
 					label: args.source.name,
 					column: args.column,
-					line : args.line
+					line: args.line
 				}]
 			};
 			this.sendResponse(response);
@@ -732,12 +766,34 @@ export class MI2DebugSession extends DebugSession {
 
 	protected setSourceFileMap(configMap: { [index: string]: string }, fallbackGDB: string, fallbackIDE: string): void {
 		if (configMap === undefined) {
-			this.sourceFileMap = new SourceFileMap({[fallbackGDB]: fallbackIDE});
+			this.sourceFileMap = new SourceFileMap({ [fallbackGDB]: fallbackIDE });
 		} else {
 			this.sourceFileMap = new SourceFileMap(configMap);
 		}
 	}
 
+	protected customRequest(command: string, response: DebugProtocol.Response, args: any, request?: DebugProtocol.Request): void {
+		switch (command) {
+			case 'get-register-names':
+				this.miDebugger.getRegisterNames().then((data) => {
+					response.body = data;
+					this.sendResponse(response);
+				});
+				break;
+
+			case 'get-register-values':
+				this.miDebugger.getRegisterValues().then((data) => {
+					response.body = data;
+					this.sendResponse(response);
+				});
+				break;
+
+			default:
+				response.body = { error: 'Invalid command.' };
+				this.sendResponse(response);
+				break;
+		}
+	}
 }
 
 function prettyStringArray(strings) {
