@@ -1,4 +1,4 @@
-import { Breakpoint, IBackend, Thread, Stack, SSHArguments, Variable, VariableObject, MIError, RegisterValue } from "../backend";
+import { Breakpoint, IBackend, Thread, Stack, SSHArguments, Variable, VariableObject, MIError } from "../backend";
 import * as ChildProcess from "child_process";
 import { EventEmitter } from "events";
 import { parseMI, MINode } from '../mi_parse';
@@ -7,14 +7,10 @@ import * as net from "net";
 import * as fs from "fs";
 import * as path from "path";
 import { Client } from "ssh2";
+import { RegistersTable, RegisterNode } from "./registerstable";
 
 export function escape(str: string) {
 	return str.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
-}
-
-export interface RegisterPair {
-	index: number;
-	name: string;
 }
 
 const nonOutput = /^(?:\d*|undefined)[\*\+\=]|[\~\@\&\^]/;
@@ -30,15 +26,14 @@ function couldBeOutput(line: string) {
 const trace = false;
 
 export class MI2 extends EventEmitter implements IBackend {
-	private registers: RegisterPair[];
+	private registers: RegistersTable = undefined;
 
 	constructor(public application: string,
-				public preargs: string[],
-				public extraargs: string[],
-				procEnv: any,
-				public extraCommands: string[] = [],
-				registers: string[] = [])
-	{
+		public preargs: string[],
+		public extraargs: string[],
+		procEnv: any,
+		public extraCommands: string[] = [],
+		registers: string[] = []) {
 		super();
 
 		if (procEnv) {
@@ -59,8 +54,8 @@ export class MI2 extends EventEmitter implements IBackend {
 			}
 			this.procEnv = env;
 		}
-		if(registers){
-			this.registers = registers.map(_name => {return {name: _name, index: 0xffff}});
+		if (registers) {
+			this.registers = new RegistersTable(registers);
 		}
 	}
 
@@ -325,7 +320,7 @@ export class MI2 extends EventEmitter implements IBackend {
 	}
 
 	onOutputStderr(lines) {
-		lines = <string[]> lines.split('\n');
+		lines = <string[]>lines.split('\n');
 		lines.forEach(line => {
 			this.log("stderr", line);
 		});
@@ -340,7 +335,7 @@ export class MI2 extends EventEmitter implements IBackend {
 	}
 
 	onOutput(lines) {
-		lines = <string[]> lines.split('\n');
+		lines = <string[]>lines.split('\n');
 		lines.forEach(line => {
 			if (couldBeOutput(line)) {
 				if (!gdbMatch.exec(line))
@@ -401,13 +396,13 @@ export class MI2 extends EventEmitter implements IBackend {
 											case "solib-event":
 											case "syscall-entry":
 											case "syscall-return":
-											// TODO: inform the user
+												// TODO: inform the user
 												this.emit("step-end", parsed);
 												break;
 											case "fork":
 											case "vfork":
 											case "exec":
-											// TODO: inform the user, possibly add second inferior
+												// TODO: inform the user, possibly add second inferior
 												this.emit("step-end", parsed);
 												break;
 											case "signal-received":
@@ -420,10 +415,10 @@ export class MI2 extends EventEmitter implements IBackend {
 												this.log("stderr", "Program exited with code " + parsed.record("exit-code"));
 												this.emit("exited-normally", parsed);
 												break;
-												// case "exited-signalled":	// consider handling that explicit possible
-												// 	this.log("stderr", "Program exited because of signal " + parsed.record("signal"));
-												// 	this.emit("stopped", parsed);
-												// 	break;
+											// case "exited-signalled":	// consider handling that explicit possible
+											// 	this.log("stderr", "Program exited because of signal " + parsed.record("signal"));
+											// 	this.emit("stopped", parsed);
+											// 	break;
 
 											default:
 												this.log("console", "Not implemented stop reason (assuming exception): " + reason);
@@ -778,7 +773,7 @@ export class MI2 extends EventEmitter implements IBackend {
 		});
 	}
 
-	getRegisterNames():  Thenable<RegisterPair[]> {
+	getRegisterNames(): Thenable<RegistersTable> {
 		if (trace)
 			this.log("stderr", "getRegisterNames");
 		return new Promise((resolve, reject) => {
@@ -789,34 +784,29 @@ export class MI2 extends EventEmitter implements IBackend {
 					reject();
 					return;
 				}
-				let regs: RegisterPair[] = names.map((name, index) => { return {name:name.toString(), index: index} });
-				if(0 != this.registers.length){
-					let new_regs: RegisterPair[] = [];
-					this.registers.forEach(pair => {
-						const inc = names.includes(pair.name);
-						if(inc){
-							const index = names.indexOf(pair.name);
-							new_regs.push({name:pair.name, index:index})
-						}
-					});
-					this.registers = new_regs;
-					regs = new_regs;
+				if (this.registers.listExist()) {
+					this.registers.setIndexes(names);
 				}
-				resolve(regs);
+				resolve(this.registers);
 			}, reject);
 		});
 	}
 
-	getRegisterValues(): Thenable<RegisterValue[]> {
+	getRegisterValues(): Thenable<RegistersTable> {
 		if (trace)
 			this.log("stderr", "getRegisterValues");
 		return new Promise((resolve, reject) => {
 			let regs = undefined;
-			if(0 != this.registers.length){
-				const indexes = this.registers.filter(pair => pair.index != 0xffff).map(pair => pair.index.toString());
+			if (this.registers.listExist()) {
+				regs = "";
+				const indexes = this.registers.getIndexes();
 				indexes.forEach(ind => regs += ind + ' ');
+				if ("" == regs) {
+					resolve(undefined);
+					return;
+				}
 			}
-			const com = regs? `N ${regs}` : "N";
+			const com = regs ? `N ${regs}` : "N";
 			this.sendCommand(`data-list-register-values ${com}`).then((result) => {
 				const nodes = result.result('register-values');
 				if (!Array.isArray(nodes)) {
@@ -824,12 +814,13 @@ export class MI2 extends EventEmitter implements IBackend {
 					reject();
 					return;
 				}
-				const ret: RegisterValue[] = nodes.map(node => {
+				const transmuted: {index: number, value: string}[] = nodes.map(node => {
 					const index = parseInt(MINode.valueOf(node, "number"));
 					const value = MINode.valueOf(node, "value");
-					return {index: index, value: value};
+					return { index: index, value: value };
 				});
-				resolve(ret);
+				this.registers.setValues(transmuted);
+				resolve(this.registers);
 			}, reject);
 		});
 	}

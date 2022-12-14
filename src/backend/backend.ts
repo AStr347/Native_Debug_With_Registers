@@ -3,11 +3,6 @@ import { DebugProtocol } from "vscode-debugprotocol/lib/debugProtocol";
 
 export type ValuesFormattingMode = "disabled" | "parseText" | "prettyPrinters";
 
-export interface RegisterValue {
-	index: number;
-	value: string;
-}
-
 export interface Breakpoint {
 	file?: string;
 	line?: number;
